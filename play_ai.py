@@ -3,8 +3,12 @@ import sys
 import time
 import torch
 import numpy as np
-from game import Game
+from game import Game, warmup_jit
 from train import DQNAgent
+
+# 预热Numba JIT编译
+print("预热Numba JIT编译...")
+warmup_jit()
 
 # 初始化pygame
 pygame.init()
@@ -64,6 +68,10 @@ tile_font = pygame.font.SysFont("Arial", 30, bold=True)
 button_font = pygame.font.SysFont("Arial", 20, bold=True)
 info_font = pygame.font.SysFont("Arial", 16)
 
+# 使用JIT编译优化前向传播
+def forward_jit(model, x):
+    return model(x)
+
 class Button:
     def __init__(self, x, y, width, height, text, font=button_font):
         self.rect = pygame.Rect(x, y, width, height)
@@ -119,7 +127,7 @@ def draw_grid(game, buttons, ai_info=""):
     screen.blit(title_surf, (20, 20))
     
     # 绘制分数
-    score_surf = score_font.render(f"分数: {game.score}", True, FONT_COLOR)
+    score_surf = score_font.render(f"Score: {game.score}", True, FONT_COLOR)
     screen.blit(score_surf, (WIDTH - score_surf.get_width() - 20, 20))
     
     # 绘制AI信息
@@ -137,7 +145,7 @@ def draw_grid(game, buttons, ai_info=""):
         for j in range(4):
             x = WIDTH // 2 - GRID_SIZE // 2 + j * (TILE_SIZE + GRID_PADDING) + GRID_PADDING
             y = 120 + i * (TILE_SIZE + GRID_PADDING) + GRID_PADDING
-            draw_tile(game.grid[i][j], x, y)
+            draw_tile(game.grid[i, j], x, y)
     
     # 绘制按钮
     for button in buttons:
@@ -149,9 +157,11 @@ def draw_grid(game, buttons, ai_info=""):
 def get_state(game):
     """将游戏网格转换为状态表示（与train.py中的_get_state保持一致）"""
     state = []
-    for row in game.grid:
-        for cell in row:
+    grid = game.grid
+    for i in range(4):
+        for j in range(4):
             # 使用对数表示，避免数值过大
+            cell = grid[i, j]
             state.append(np.log2(cell) if cell > 0 else 0)
     return np.array(state, dtype=np.float32)
 
@@ -160,21 +170,28 @@ def play_ai_game(model_path, delay=0.5):
     # 初始化游戏
     game = Game()
     
+    # 检查可用设备
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    print(f"使用设备: {device}")
+    
     # 加载AI模型
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = DQNAgent(state_size=16, action_size=4, epsilon=0)  # 不使用探索
     agent.q_network.load_state_dict(torch.load(model_path, map_location=device))
     agent.q_network.eval()
     
     # 创建按钮
-    restart_button = Button(WIDTH // 2 - 100, 540, 90, 40, "重新开始")
-    quit_button = Button(WIDTH // 2 + 10, 540, 90, 40, "退出")
+    restart_button = Button(WIDTH // 2 - 100, 540, 90, 40, "Restart")
+    quit_button = Button(WIDTH // 2 + 10, 540, 90, 40, "Quit")
     buttons = [restart_button, quit_button]
     
     # 游戏循环
     running = True
     game_over = False
-    action_names = ["上", "下", "左", "右"]
+    action_names = ["Up", "Down", "Left", "Right"]
+    
+    # 添加卡住检测
+    stuck_counter = 0
+    stuck_threshold = 10  # 连续10次无效移动视为卡住
     
     while running:
         # 处理事件
@@ -190,6 +207,7 @@ def play_ai_game(model_path, delay=0.5):
                 if restart_button.is_clicked(mouse_pos, True):
                     game = Game()
                     game_over = False
+                    stuck_counter = 0  # 重置卡住计数器
                 
                 # 退出按钮
                 if quit_button.is_clicked(mouse_pos, True):
@@ -206,7 +224,11 @@ def play_ai_game(model_path, delay=0.5):
             state = get_state(game)
             
             # AI选择动作
-            action = agent.select_action(state, training=False)
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+            with torch.no_grad():
+                q_values = agent.q_network(state_tensor)
+                action = q_values.argmax().item()
+            
             action_name = action_names[action]
             
             # 执行动作
@@ -220,19 +242,29 @@ def play_ai_game(model_path, delay=0.5):
             elif action == 3:  # 右
                 moved = game.move_right()
             
-            # 如果移动有效，添加新的方块
-            if moved:
+            # 检测是否卡住
+            if not moved:
+                stuck_counter += 1
+                if stuck_counter >= stuck_threshold:
+                    ai_info = f"AI is stuck! {stuck_threshold} invalid moves in a row. Restarting game..."
+                    draw_grid(game, buttons, ai_info)
+                    time.sleep(1.5)  # 显示一段时间后重新开始
+                    game = Game()
+                    stuck_counter = 0
+                    continue
+            else:
+                stuck_counter = 0  # 有效移动，重置卡住计数器
                 game.add_new_tile()
             
             # 绘制游戏状态
-            ai_info = f"AI动作: {action_name} | 有效移动: {'是' if moved else '否'}"
+            ai_info = f"AI Move: {action_name} | Valid: {'Yes' if moved else 'No'} | Invalid Count: {stuck_counter if not moved else 0}"
             draw_grid(game, buttons, ai_info)
             
             # 检查游戏是否结束
             if game.is_game_over():
                 game_over = True
-                max_tile = max(max(row) for row in game.grid)
-                ai_info = f"游戏结束! 最终分数: {game.score} | 最大方块: {max_tile}"
+                max_tile = np.max(game.grid)
+                ai_info = f"Game Over! Final Score: {game.score} | Max Tile: {max_tile}"
                 draw_grid(game, buttons, ai_info)
             
             # 添加延迟，使动作可见
@@ -248,12 +280,19 @@ def play_ai_game(model_path, delay=0.5):
 if __name__ == "__main__":
     # 检查是否有训练好的模型
     import os
-    model_path = "models/dqn_model_final.pth"
+    model_path = "models/dqn_model_best.pth"  # 使用最佳模型而不是最终模型
     
     if not os.path.exists(model_path):
-        print(f"错误: 找不到模型文件 '{model_path}'")
-        print("请先运行 train.py 训练模型")
-        sys.exit(1)
+        # 如果最佳模型不存在，尝试使用最终模型
+        model_path = "models/dqn_model_final.pth"
+        if not os.path.exists(model_path):
+            print(f"Error: Model file '{model_path}' not found")
+            print("Please run train.py first to train a model")
+            sys.exit(1)
+        else:
+            print(f"Using final model: {model_path}")
+    else:
+        print(f"Using best model: {model_path}")
     
     # 使用AI玩游戏
-    play_ai_game(model_path, delay=0.3) 
+    play_ai_game(model_path, delay=0.1) 

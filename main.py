@@ -1,6 +1,10 @@
 import pygame
 import sys
-from game import Game
+from game import Game, warmup_jit
+
+# 预热Numba JIT编译
+print("预热Numba JIT编译...")
+warmup_jit()
 
 # Initialize pygame
 pygame.init()
@@ -126,7 +130,7 @@ def draw_grid(game, buttons):
         for j in range(4):
             x = 50 + GRID_PADDING + j * (TILE_SIZE + GRID_PADDING)
             y = 100 + GRID_PADDING + i * (TILE_SIZE + GRID_PADDING)
-            draw_tile(game.grid[i][j], x, y)
+            draw_tile(game.grid[i, j], x, y)
     
     # Draw buttons
     for button in buttons:
