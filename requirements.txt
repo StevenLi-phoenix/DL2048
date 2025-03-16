@@ -1,0 +1,6 @@
+# 使用conda环境安装依赖
+# conda create -n dl2048 python=3.12 -y
+# conda activate dl2048
+# conda install -c conda-forge pygame -y
+
+pygame>=2.6.1 
