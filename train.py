@@ -15,11 +15,11 @@ SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(SEED)
+if torch.backends.mps.is_available():
+    torch.manual_seed(SEED)
 
-# 检查是否有可用的GPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# 检查是否有可用的MPS
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 print(f"使用设备: {device}")
 
 # DQN网络结构
