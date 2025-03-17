@@ -33,11 +33,11 @@ print(f"使用设备: {device}")
 class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
-        # 输入层: 4x4网格，每个格子的值（使用对数表示）
-        self.fc1 = nn.Linear(16, 64)  # 减少神经元数量，从128减少到64
-        self.fc2 = nn.Linear(64, 64)  # 减少神经元数量，从128减少到64
-        self.fc3 = nn.Linear(64, 32)  # 减少神经元数量，从64减少到32
-        self.fc4 = nn.Linear(32, 4)  # 输出层: 4个动作（上、下、左、右）
+        # 输入层: 25个特征（16个网格值 + 4个移动有效性 + 5个额外游戏状态信息）
+        self.fc1 = nn.Linear(25, 128)
+        self.fc2 = nn.Linear(128, 256)
+        self.fc3 = nn.Linear(256, 64)
+        self.fc4 = nn.Linear(64, 4)  # 输出层: 4个动作（上、下、左、右）
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -104,11 +104,84 @@ class GameEnv:
         # 将游戏网格转换为状态表示
         state = []
         grid = self.game.grid
+        
+        # 1. 基本网格信息 - 16个特征
         for i in range(4):
             for j in range(4):
                 # 使用对数表示，避免数值过大
                 cell = grid[i, j]
                 state.append(np.log2(cell) if cell > 0 else 0)
+        
+        # 2. 模拟四个方向的移动结果 - 4个特征
+        # 创建临时游戏对象进行模拟
+        temp_game = Game()
+        temp_game.grid = grid.copy()
+        
+        # 模拟上移
+        up_valid = temp_game.move_up()
+        state.append(1.0 if up_valid else 0.0)
+        
+        # 重置并模拟下移
+        temp_game.grid = grid.copy()
+        down_valid = temp_game.move_down()
+        state.append(1.0 if down_valid else 0.0)
+        
+        # 重置并模拟左移
+        temp_game.grid = grid.copy()
+        left_valid = temp_game.move_left()
+        state.append(1.0 if left_valid else 0.0)
+        
+        # 重置并模拟右移
+        temp_game.grid = grid.copy()
+        right_valid = temp_game.move_right()
+        state.append(1.0 if right_valid else 0.0)
+        
+        # 3. 额外游戏状态信息 - 5个特征
+        # 空格数量
+        empty_cells = np.sum(grid == 0)
+        state.append(empty_cells / 16.0)  # 归一化
+        
+        # 最大方块值
+        max_tile = np.max(grid)
+        state.append(np.log2(max_tile) / 11.0 if max_tile > 0 else 0)  # 归一化，假设最大可能是2048 (2^11)
+        
+        # 合并可能性 - 相邻相同数字的数量
+        merge_count = 0
+        # 检查水平相邻
+        for i in range(4):
+            for j in range(3):
+                if grid[i, j] > 0 and grid[i, j] == grid[i, j+1]:
+                    merge_count += 1
+        # 检查垂直相邻
+        for i in range(3):
+            for j in range(4):
+                if grid[i, j] > 0 and grid[i, j] == grid[i+1, j]:
+                    merge_count += 1
+        state.append(merge_count / 24.0)  # 归一化，最多24个相邻位置
+        
+        # 单调性 - 检查数字是否按顺序排列
+        monotonicity_x = 0
+        monotonicity_y = 0
+        
+        # 水平单调性
+        for i in range(4):
+            for j in range(3):
+                if grid[i, j] >= grid[i, j+1] > 0 or grid[i, j] == 0:
+                    monotonicity_x += 1
+                if grid[i, j] <= grid[i, j+1] or grid[i, j+1] == 0:
+                    monotonicity_x += 1
+        
+        # 垂直单调性
+        for j in range(4):
+            for i in range(3):
+                if grid[i, j] >= grid[i+1, j] > 0 or grid[i, j] == 0:
+                    monotonicity_y += 1
+                if grid[i, j] <= grid[i+1, j] or grid[i+1, j] == 0:
+                    monotonicity_y += 1
+        
+        state.append(monotonicity_x / 48.0)  # 归一化
+        state.append(monotonicity_y / 48.0)  # 归一化
+        
         return np.array(state, dtype=np.float32)
     
     def _get_reward(self, moved):
@@ -116,39 +189,106 @@ class GameEnv:
         if not moved:
             return -5  # 减少负奖励，从-10改为-5
         
-        # 基础奖励为当前得分与上一步得分的差值
+        # 基础奖励
         reward = 0
         
-        # 额外奖励：鼓励合并相同数字
+        # 获取游戏网格和状态信息
         grid = self.game.grid
         max_tile = np.max(grid)
         empty_cells = np.sum(grid == 0)
         
-        # 奖励最大方块值和空格数量
-        reward += np.log2(max_tile) * 0.5 if max_tile > 0 else 0  # 增加最大方块的奖励权重
-        reward += empty_cells * 1.0  # 增加空格数量的奖励权重
+        # 1. 奖励最大方块值（使用对数刻度）
+        reward += np.log2(max_tile) * 0.5 if max_tile > 0 else 0
         
-        # 额外奖励：鼓励将大数字放在角落
+        # 2. 奖励空格数量
+        reward += empty_cells * 1.0
+        
+        # 3. 奖励合并可能性 - 相邻相同数字的数量
+        merge_count = 0
+        # 检查水平相邻
+        for i in range(4):
+            for j in range(3):
+                if grid[i, j] > 0 and grid[i, j] == grid[i, j+1]:
+                    merge_count += 1
+        # 检查垂直相邻
+        for i in range(3):
+            for j in range(4):
+                if grid[i, j] > 0 and grid[i, j] == grid[i+1, j]:
+                    merge_count += 1
+        reward += merge_count * 0.5
+        
+        # 4. 奖励单调性 - 检查数字是否按顺序排列
+        monotonicity_x = 0
+        monotonicity_y = 0
+        
+        # 水平单调性
+        for i in range(4):
+            for j in range(3):
+                if grid[i, j] >= grid[i, j+1] > 0 or grid[i, j] == 0:
+                    monotonicity_x += 1
+                if grid[i, j] <= grid[i, j+1] or grid[i, j+1] == 0:
+                    monotonicity_x += 1
+        
+        # 垂直单调性
+        for j in range(4):
+            for i in range(3):
+                if grid[i, j] >= grid[i+1, j] > 0 or grid[i, j] == 0:
+                    monotonicity_y += 1
+                if grid[i, j] <= grid[i+1, j] or grid[i+1, j] == 0:
+                    monotonicity_y += 1
+        
+        reward += (monotonicity_x + monotonicity_y) * 0.05
+        
+        # 5. 额外奖励：鼓励将大数字放在角落
         corners = [grid[0, 0], grid[0, 3], grid[3, 0], grid[3, 3]]
         max_corner = max(corners)
         if max_corner == max_tile and max_tile > 8:  # 如果最大方块在角落
             reward += 2.0  # 给予额外奖励
+            
+            # 额外奖励：如果最大方块在角落，并且周围的数字呈递减趋势
+            if max_corner == grid[0, 0]:  # 左上角
+                if grid[0, 1] <= grid[0, 0] and grid[1, 0] <= grid[0, 0]:
+                    reward += 1.0
+            elif max_corner == grid[0, 3]:  # 右上角
+                if grid[0, 2] <= grid[0, 3] and grid[1, 3] <= grid[0, 3]:
+                    reward += 1.0
+            elif max_corner == grid[3, 0]:  # 左下角
+                if grid[2, 0] <= grid[3, 0] and grid[3, 1] <= grid[3, 0]:
+                    reward += 1.0
+            elif max_corner == grid[3, 3]:  # 右下角
+                if grid[2, 3] <= grid[3, 3] and grid[3, 2] <= grid[3, 3]:
+                    reward += 1.0
+        
+        # 6. 惩罚蛇形排列（通常不是好的策略）
+        snake_penalty = 0
+        # 检查水平蛇形
+        for i in range(4):
+            if (i % 2 == 0 and grid[i, 0] < grid[i, 1] < grid[i, 2] < grid[i, 3]) or \
+               (i % 2 == 1 and grid[i, 0] > grid[i, 1] > grid[i, 2] > grid[i, 3]):
+                snake_penalty += 1
+        # 检查垂直蛇形
+        for j in range(4):
+            if (j % 2 == 0 and grid[0, j] < grid[1, j] < grid[2, j] < grid[3, j]) or \
+               (j % 2 == 1 and grid[0, j] > grid[1, j] > grid[2, j] > grid[3, j]):
+                snake_penalty += 1
+        
+        reward -= snake_penalty * 0.5
         
         return reward
 
 # DQN智能体
 class DQNAgent:
-    def __init__(self, state_size, action_size, buffer_size=5000, batch_size=32, gamma=0.95, 
-                 epsilon=1.0, epsilon_min=0.05, epsilon_decay=0.98, learning_rate=0.002):
+    def __init__(self, state_size, action_size, buffer_size=4096, batch_size=4096, gamma=0.97, 
+                 epsilon=1.0, epsilon_min=0.05, epsilon_decay=0.995, learning_rate=0.001):
         self.state_size = state_size
         self.action_size = action_size
-        self.buffer_size = buffer_size  # 减少缓冲区大小，从10000减少到5000
-        self.batch_size = batch_size  # 减少批次大小，从64减少到32
-        self.gamma = gamma  # 减少折扣因子，从0.99减少到0.95
+        self.buffer_size = buffer_size  # 增加缓冲区大小，从1000增加到2000
+        self.batch_size = batch_size  # 增加批次大小，从32增加到64
+        self.gamma = gamma  # 增加折扣因子，从0.95增加到0.97
         self.epsilon = epsilon  # 探索率
-        self.epsilon_min = epsilon_min  # 增加最小探索率，从0.01增加到0.05
-        self.epsilon_decay = epsilon_decay  # 加快探索率衰减，从0.995增加到0.98
-        self.learning_rate = learning_rate  # 增加学习率，从0.001增加到0.002
+        self.epsilon_min = epsilon_min  # 保持最小探索率为0.05
+        self.epsilon_decay = epsilon_decay  # 减缓探索率衰减，从0.98减少到0.995
+        self.learning_rate = learning_rate  # 减小学习率，从0.002减少到0.001
         
         # 创建Q网络和目标网络
         self.q_network = DQN().to(device)
@@ -246,9 +386,9 @@ class DQNAgent:
         return loss.item()
 
 # 训练函数
-def train_agent(episodes=500, max_steps=10000, model_dir="models"):
+def train_agent(episodes=1000, max_steps=10000, model_dir="models"):
     env = GameEnv()
-    agent = DQNAgent(state_size=16, action_size=env.action_space)
+    agent = DQNAgent(state_size=25, action_size=env.action_space)
     
     # 创建模型保存目录
     os.makedirs(model_dir, exist_ok=True)
@@ -298,7 +438,7 @@ def train_agent(episodes=500, max_steps=10000, model_dir="models"):
         losses.append(episode_loss / steps if steps > 0 else 0)
         
         # 打印训练信息
-        if (episode + 1) % 5 == 0:  # 更频繁地打印信息，从10改为5
+        if (episode + 1) % 10 == 0:  # 减少打印频率，从5改为10
             print(f"Episode {episode+1}/{episodes}, Score: {info['score']}, "
                   f"Max Tile: {max_tile}, Epsilon: {agent.epsilon:.4f}")
         
@@ -326,25 +466,31 @@ def train_agent(episodes=500, max_steps=10000, model_dir="models"):
     torch.save(agent.q_network.state_dict(), os.path.join(model_dir, "dqn_model_final.pth"))
     
     # 绘制训练曲线
+    # plt can only show english by default
+    # system font is blocked and cannot be changed
+    # do not try to change language to chinese
+    
     plt.figure(figsize=(15, 5))
     
     plt.subplot(1, 3, 1)
     plt.plot(scores)
-    plt.title('得分')
-    plt.xlabel('回合')
-    plt.ylabel('得分')
+    plt.title('Scores')
+    plt.xlabel('Episodes')
+    plt.ylabel('Scores')
     
     plt.subplot(1, 3, 2)
     plt.plot(max_tiles)
-    plt.title('最大方块')
-    plt.xlabel('回合')
-    plt.ylabel('最大方块值')
+    plt.yscale('log')
+    plt.title('Max Tile (Log Scale)')
+    plt.xlabel('Episodes')
+    plt.ylabel('Max Tile Value (Log Scale)')
+    plt.ylim(0, 10)
     
     plt.subplot(1, 3, 3)
     plt.plot(losses)
-    plt.title('损失')
-    plt.xlabel('回合')
-    plt.ylabel('平均损失')
+    plt.title('Loss')
+    plt.xlabel('Episodes')
+    plt.ylabel('Average Loss')
     
     plt.tight_layout()
     plt.savefig(os.path.join(model_dir, "training_curves.png"))
@@ -355,7 +501,7 @@ def train_agent(episodes=500, max_steps=10000, model_dir="models"):
 # 测试函数
 def test_agent(model_path, episodes=10, render=False):
     env = GameEnv()
-    agent = DQNAgent(state_size=16, action_size=env.action_space, epsilon=0)  # 测试时不使用探索
+    agent = DQNAgent(state_size=25, action_size=env.action_space, epsilon=0)  # 测试时不使用探索
     
     # 加载模型
     agent.q_network.load_state_dict(torch.load(model_path, map_location=device))
@@ -378,6 +524,11 @@ def test_agent(model_path, episodes=10, render=False):
             # 选择动作
             action = agent.select_action(state, training=False)
             
+            # 获取Q值，用于显示
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+            with torch.no_grad():
+                q_values = agent.q_network(state_tensor).cpu().numpy()[0]
+            
             # 执行动作
             next_state, reward, done, info = env.step(action)
             
@@ -399,7 +550,20 @@ def test_agent(model_path, episodes=10, render=False):
                 os.system('clear' if os.name == 'posix' else 'cls')
                 print(f"Episode: {episode+1}/{episodes}, Score: {info['score']}, Steps: {step_count}")
                 print(env.game.grid)
-                print(f"动作: {['上', '下', '左', '右'][action]}, 有效: {not is_no_op}, 无效计数: {no_op_count}")
+                
+                # 打印动作和Q值
+                action_names = ['上', '下', '左', '右']
+                print(f"动作: {action_names[action]}, 有效: {not is_no_op}, 无效计数: {no_op_count}")
+                print(f"Q值: 上={q_values[0]:.2f}, 下={q_values[1]:.2f}, 左={q_values[2]:.2f}, 右={q_values[3]:.2f}")
+                
+                # 打印状态特征
+                print("\n状态特征:")
+                print(f"移动有效性: 上={state[16]:.1f}, 下={state[17]:.1f}, 左={state[18]:.1f}, 右={state[19]:.1f}")
+                print(f"空格数量: {state[20]*16:.0f}/16")
+                print(f"最大方块: {2**int(state[21]*11) if state[21] > 0 else 0}")
+                print(f"合并可能性: {state[22]*24:.1f}/24")
+                print(f"单调性X: {state[23]*48:.1f}/48, 单调性Y: {state[24]*48:.1f}/48")
+                
                 print("\n")
                 time.sleep(0.1)
         
@@ -427,9 +591,8 @@ if __name__ == "__main__":
     start_time = time.time()
     
     # 训练配置
-    episodes = 1000  # 减少回合数，加快训练
+    episodes = 10000  # 减少回合数，加快训练
     max_steps = 10000  # 减少最大步数，加快训练
-    # save_interval = 200  # 减少保存间隔，更频繁保存
     
     print(f"训练配置: 回合数={episodes}, 最大步数={max_steps}")
     
@@ -441,4 +604,4 @@ if __name__ == "__main__":
     
     # 测试智能体
     print("\n开始测试DQN智能体...")
-    test_agent("models/dqn_model_best.pth", episodes=5, render=True)
+    test_agent("models/dqn_model_best.pth", episodes=10, render=True)
