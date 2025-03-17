@@ -34,16 +34,24 @@ class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
         # 输入层: 25个特征（16个网格值 + 4个移动有效性 + 5个额外游戏状态信息）
-        self.fc1 = nn.Linear(25, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 64)
-        self.fc4 = nn.Linear(64, 4)  # 输出层: 4个动作（上、下、左、右）
+        self.fc1 = nn.Linear(25, 256)
+        self.fc2 = nn.Linear(256, 512)
+        self.fc3 = nn.Linear(512, 256)
+        self.fc4 = nn.Linear(256, 128)
+        self.fc5 = nn.Linear(128, 64)
+        self.fc6 = nn.Linear(64, 32)
+        self.fc7 = nn.Linear(32, 16)
+        self.fc8 = nn.Linear(16, 4)  # 输出层: 4个动作（上、下、左、右）
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        return self.fc4(x)
+        x = F.relu(self.fc4(x))
+        x = F.relu(self.fc5(x))
+        x = F.relu(self.fc6(x))
+        x = F.relu(self.fc7(x))
+        return self.fc8(x)
 
 # 使用JIT编译优化前向传播
 def forward_jit(model, x):
@@ -439,8 +447,8 @@ def train_agent(episodes=1000, max_steps=10000, model_dir="models"):
         
         # 打印训练信息
         if (episode + 1) % 10 == 0:  # 减少打印频率，从5改为10
-            print(f"Episode {episode+1}/{episodes}, Score: {info['score']}, "
-                  f"Max Tile: {max_tile}, Epsilon: {agent.epsilon:.4f}")
+            tqdm.write(f"Episode {episode+1}/{episodes}, Score: {info['score']}, "
+                      f"Max Tile: {max_tile}, Epsilon: {agent.epsilon:.4f}")
         
         # 保存模型
         if episode % 100 == 0:
