@@ -1,3 +1,5 @@
+![DL2048 banner](./banner.png)
+
 # 2048 Game
 
 A 2048 game implemented with Python and Pygame, with AI support using Deep Q-Learning (DQN).
